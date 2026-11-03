@@ -2,52 +2,79 @@
 require 'config/db.php';
 require 'includes/estimate.php';
 function e($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
-$data = null; $err = '';
+
+$v = null; $err = ''; $payload = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $s = $db->prepare("SELECT v.id, v.queue_code, p.full_name, p.phone FROM visits v JOIN patients p ON p.id=v.patient_id WHERE v.queue_code=?");
-  $s->execute([strtoupper(trim($_POST['code']))]);
+  $s->execute([strtoupper(trim($_POST['code'] ?? ''))]);
   $v = $s->fetch();
-  if ($v && substr($v['phone'], -4) === trim($_POST['pin'])) {
-    $data = ['v' => $v, 'j' => journey($db, (int)$v['id'])];
+  if (!$v || substr($v['phone'], -4) !== trim($_POST['pin'] ?? '')) {
+    $v = null; $err = 'Queue ID or phone digits not correct. Please check and try again.';
+  } else {
+    $j = journey($db, (int)$v['id']);
     $n = $db->prepare("SELECT message,created_at FROM notifications WHERE visit_id=? ORDER BY id DESC LIMIT 3");
-    $n->execute([$v['id']]); $data['n'] = $n->fetchAll();
-  } else $err = 'Queue ID or phone digits not correct.';
+    $n->execute([$v['id']]);
+    $payload = ['stages' => $j['stages'], 'remaining' => $j['remaining'], 'notes' => $n->fetchAll()];
+  }
 }
-?>
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Track My Visit</title></head>
-<body style="font-family:sans-serif;max-width:520px;margin:30px auto;padding:0 12px">
-<h2>MedFlow: Track my visit</h2>
-<?php if (!$data): ?>
-<p style="color:red"><?= e($err) ?></p>
-<form method="post">
-  <input name="code" placeholder="Queue ID e.g. Q-0001" required style="width:100%;padding:8px;margin:4px 0"><br>
-  <input name="pin" placeholder="Last 4 digits of phone" maxlength="4" required style="width:100%;padding:8px;margin:4px 0"><br>
-  <button style="padding:8px 16px">Track</button>
-</form>
+$title = 'Track my visit';
+require 'includes/header.php';
+
+if (!$v): ?>
+<div class="hero">
+  <img src="/medflow/assets/img/ambulance.svg" alt="">
+  <div>
+    <h1>Smarter patient flow,<br>better healthcare</h1>
+    <p>Know where you are in your hospital visit and how long it will take.</p>
+  </div>
+</div>
+
+<div class="card" style="max-width:480px;margin:0 auto 18px">
+  <h2>Track my visit</h2>
+  <p class="muted">Enter the Queue ID you were given at reception.</p>
+  <?php if ($err): ?><div class="msg err"><?= e($err) ?></div><?php endif; ?>
+  <form method="post">
+    <label>Queue ID</label>
+    <input name="code" placeholder="e.g. Q-0001" required value="<?= e($_POST['code'] ?? '') ?>">
+    <label>Last 4 digits of your phone number</label>
+    <input name="pin" maxlength="4" inputmode="numeric" placeholder="e.g. 5678" required>
+    <button>Track my visit</button>
+  </form>
+</div>
+
 <?php else: ?>
-<p><b>Patient:</b> <?= e($data['v']['full_name']) ?><br><b>Queue ID:</b> <?= e($data['v']['queue_code']) ?></p>
-<table border="1" cellpadding="8" cellspacing="0" width="100%">
-<tr><th>Stage</th><th>Status</th><th>Information</th></tr>
-<?php foreach ($data['j']['stages'] as $s): ?>
-<tr><td><?= e($s['name']) ?></td><td><?= e(ucfirst(str_replace('_',' ',$s['status']))) ?></td>
-<td><?php
- if (in_array($s['status'],['waiting','in_service'])) echo e($s['ahead']).' ahead, about '.e($s['est']).' min';
- elseif ($s['status']==='pending') echo 'About '.e($s['est']).' min';
- else echo '-'; ?></td></tr>
-<?php endforeach; ?>
-</table>
-<p><b>Estimated remaining time: about <?= (int)floor($data['j']['remaining']/60) ?>h <?= $data['j']['remaining']%60 ?>m</b><br>
-<small>Estimates are approximate, not guaranteed.</small></p>
-<?php foreach ($data['n'] as $n): ?><p>🔔 <?= e($n['message']) ?> <small>(<?= e($n['created_at']) ?>)</small></p><?php endforeach; ?>
-<form method="post" id="refreshForm">
-  <input type="hidden" name="code" value="<?= e($data['v']['queue_code']) ?>">
-  <input type="hidden" name="pin" value="<?= e(substr($data['v']['phone'], -4)) ?>">
-  <button style="padding:8px 16px">Refresh now</button>
-</form>
-<p><small>This page updates automatically every 15 seconds.</small></p>
-<script>
-  setTimeout(function () { document.getElementById('refreshForm').submit(); }, 15000);
-</script>
-<?php endif; ?>
-</body></html>
+<div class="card" id="tracker" data-code="<?= e($v['queue_code']) ?>" data-pin="<?= e(substr($v['phone'], -4)) ?>">
+  <div class="qhead">
+    <div>
+      <h2 style="margin-bottom:2px"><?= e($v['full_name']) ?></h2>
+      <p class="muted">Queue ID <b><?= e($v['queue_code']) ?></b></p>
+    </div>
+    <a class="btn btn-alt" href="/medflow/track.php">Track another</a>
+  </div>
+
+  <div id="banner" class="status-banner">Loading your status...</div>
+
+  <div class="stats">
+    <div class="stat"><small>Current stage</small><b id="curStage">-</b></div>
+    <div class="stat"><small>Patients ahead</small><b id="ahead">-</b></div>
+    <div class="stat"><small>Wait at this stage</small><b id="wait">-</b></div>
+    <div class="stat hot"><small>Total time left</small><b id="remaining">-</b></div>
+  </div>
+
+  <div class="steps" id="steps"></div>
+
+  <table>
+    <thead><tr><th>Stage</th><th>Status</th><th>Information</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <h3 style="margin-top:18px">Updates</h3>
+  <div id="notes"><p class="muted">No updates yet.</p></div>
+
+  <p class="muted" style="margin-top:14px"><small>Estimates are approximate, not guaranteed. <span id="updated"></span></small></p>
+</div>
+
+<script type="application/json" id="init"><?= json_encode($payload, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
+<script src="/medflow/assets/js/track.js"></script>
+<?php endif;
+require 'includes/footer.php'; ?>
